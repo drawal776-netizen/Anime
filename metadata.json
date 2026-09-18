@@ -1,0 +1,6 @@
+{
+  "name": "AniStream",
+  "description": "Premium anime, movie, and series streaming platform with live Google Sheets catalog, All Anime discovery, trailers, and watchlist.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
