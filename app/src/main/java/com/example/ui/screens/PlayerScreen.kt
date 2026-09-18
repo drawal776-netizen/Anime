@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.content.Intent
 import android.net.Uri
 import android.view.ViewGroup
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebChromeClient
 import android.webkit.WebSettings
 import android.webkit.WebView
@@ -36,6 +37,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -63,6 +65,7 @@ import com.example.ui.theme.TextMuted
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
 import com.example.ui.viewmodel.OttViewModel
+import java.io.File
 
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
@@ -77,6 +80,7 @@ fun PlayerScreen(
     val rawUrl = if (isTrailer) item.trailerUrl else item.watchUrl
     var isWebLoading by remember { mutableStateOf(true) }
     var webError by remember { mutableStateOf(false) }
+    var webViewRef by remember { mutableStateOf<WebView?>(null) }
 
     // Intercept back button to close player
     BackHandler {
@@ -95,6 +99,22 @@ fun PlayerScreen(
                 "https://www.youtube.com/embed/$videoId?autoplay=1"
             }
             else -> rawUrl
+        }
+    }
+
+    // Safely cleanup WebView when player closes or URL changes
+    DisposableEffect(targetUrl) {
+        onDispose {
+            try {
+                webViewRef?.apply {
+                    stopLoading()
+                    loadUrl("about:blank")
+                    onPause()
+                    pauseTimers()
+                    destroy()
+                }
+                webViewRef = null
+            } catch (_: Throwable) {}
         }
     }
 
@@ -185,21 +205,36 @@ fun PlayerScreen(
                 AndroidView(
                     factory = { ctx ->
                         WebView(ctx).apply {
+                            webViewRef = this
                             layoutParams = ViewGroup.LayoutParams(
                                 ViewGroup.LayoutParams.MATCH_PARENT,
                                 ViewGroup.LayoutParams.MATCH_PARENT
                             )
+
+                            // Guard against missing DRM render nodes in cloud containers/emulators
+                            try {
+                                val hasDriNode = File("/dev/dri/renderD128").exists() || File("/dev/dri").exists()
+                                if (!hasDriNode) {
+                                    setLayerType(android.view.View.LAYER_TYPE_SOFTWARE, null)
+                                }
+                            } catch (_: Throwable) {
+                                try {
+                                    setLayerType(android.view.View.LAYER_TYPE_SOFTWARE, null)
+                                } catch (_: Throwable) {}
+                            }
+
                             settings.apply {
                                 javaScriptEnabled = true
                                 domStorageEnabled = true
                                 mediaPlaybackRequiresUserGesture = false
-                                allowFileAccess = true
+                                allowFileAccess = false
                                 loadsImagesAutomatically = true
                                 mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                                userAgentString = "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
                             }
                             webChromeClient = object : WebChromeClient() {
                                 override fun onProgressChanged(view: WebView?, newProgress: Int) {
-                                    if (newProgress >= 85) {
+                                    if (newProgress >= 80) {
                                         isWebLoading = false
                                     }
                                 }
@@ -217,6 +252,18 @@ fun PlayerScreen(
                                     webError = true
                                     isWebLoading = false
                                 }
+                                override fun onRenderProcessGone(
+                                    view: WebView?,
+                                    detail: RenderProcessGoneDetail?
+                                ): Boolean {
+                                    webError = true
+                                    isWebLoading = false
+                                    try {
+                                        view?.destroy()
+                                        webViewRef = null
+                                    } catch (_: Throwable) {}
+                                    return true // CRITICAL: prevents Android OS from terminating host app on render crash
+                                }
                             }
                             loadUrl(targetUrl)
                         }
@@ -224,7 +271,7 @@ fun PlayerScreen(
                     modifier = Modifier.fillMaxSize()
                 )
 
-                if (isWebLoading) {
+                if (isWebLoading && !webError) {
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
@@ -235,6 +282,68 @@ fun PlayerScreen(
                             CircularProgressIndicator(color = FlameOrange, modifier = Modifier.size(36.dp))
                             Spacer(modifier = Modifier.height(10.dp))
                             Text("Buffering stream...", color = TextSecondary, fontSize = 12.sp)
+                        }
+                    }
+                }
+
+                if (webError) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(Color(0xEE141419))
+                            .padding(16.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.OpenInBrowser,
+                                contentDescription = null,
+                                tint = FlameOrange,
+                                modifier = Modifier.size(36.dp)
+                            )
+                            Spacer(modifier = Modifier.height(10.dp))
+                            Text(
+                                text = "Stream Playback Notice",
+                                color = TextPrimary,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 14.sp
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "Direct embedding is restricted by the content provider or device graphics.",
+                                color = TextSecondary,
+                                fontSize = 11.sp,
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier.padding(horizontal = 16.dp)
+                            )
+                            Spacer(modifier = Modifier.height(14.dp))
+                            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                Button(
+                                    onClick = {
+                                        try {
+                                            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(rawUrl))
+                                            context.startActivity(intent)
+                                        } catch (_: Exception) {}
+                                    },
+                                    colors = ButtonDefaults.buttonColors(containerColor = FlameOrange),
+                                    shape = RoundedCornerShape(8.dp)
+                                ) {
+                                    Text("Open in Browser", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                }
+                                OutlinedButton(
+                                    onClick = {
+                                        webError = false
+                                        isWebLoading = true
+                                        webViewRef?.loadUrl(targetUrl)
+                                    },
+                                    shape = RoundedCornerShape(8.dp)
+                                ) {
+                                    Text("Retry", fontSize = 12.sp, color = TextPrimary)
+                                }
+                            }
                         }
                     }
                 }
